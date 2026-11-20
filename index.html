@@ -66,6 +66,13 @@ body { background-color: #f4f6f8; color: #333; height: 100vh; display: flex; ove
 .btn-delete:hover { background-color: #e04343; }
 .api-monitor { background: #1e1e1e; color: #4af626; font-family: monospace; padding: 15px; border-radius: 8px; font-size: 13px; height: 100px; overflow-y: auto; }
 .api-monitor.error { color: #ff5252; }
+
+.admin-chat { background:#f3e8fa; border:1px solid #d9b7e8; align-self:flex-start; margin-right:auto; color:#572067; }
+.reply-panel { border-top:1px solid #ddd; background:#fff; padding:14px; display:flex; flex-direction:column; gap:9px; }
+.reply-controls { display:flex;gap:10px; }
+.reply-controls textarea { flex:1;resize:vertical;min-height:58px;padding:10px;border:1px solid #ccc;border-radius:7px;font:inherit; }
+.reply-controls button { align-self:stretch; }
+.takeover-label {font-size:13px;color:#722F82;font-weight:600;}
 </style>
 </head>
 <body>
@@ -110,6 +117,11 @@ Wizenards Admin <div id="status-dot" class="brand-status"></div>
 <div id="chat-view-area" style="display:flex; flex-direction:column;">
 <div style="text-align:center; color:#aaa; margin-top:40px;">Select a chat on the left to view.</div>
 </div>
+<div id="admin-reply-panel" class="reply-panel" style="display:none">
+<div id="takeover-label" class="takeover-label">AI active</div>
+<div class="reply-controls"><textarea id="admin-reply-text" maxlength="4000" placeholder="Reply as a human representative..."></textarea><button class="btn" id="admin-reply-send">Send</button></div>
+<div id="admin-reply-status" style="font-size:12px;color:#777"></div>
+</div>
 </div>
 </div>
 <div id="tab-leads" class="tab-view">
@@ -135,6 +147,9 @@ Wizenards Admin <div id="status-dot" class="brand-status"></div>
 <label>AI System Instructions (Prompt)</label>
 <textarea id="system-prompt" placeholder="Loading..."></textarea>
 </div>
+<div class="form-group"><label><input type="checkbox" id="telegram-enabled" style="width:auto;margin-right:8px">Enable Telegram visitor alerts</label></div>
+<div class="form-group"><label>Telegram Chat ID (not the bot token)</label><input type="text" id="telegram-chat-id" placeholder="e.g. 123456789"></div>
+<p style="font-size:12px;color:#777;margin-bottom:15px">Store the bot token in Wix Secrets Manager as TELEGRAM_BOT_TOKEN. Messages will be forwarded to this chat.</p>
 <button id="save-prompt-btn" class="btn">Save Configuration Live</button>
 </div>
 <div class="settings-card">
@@ -153,6 +168,7 @@ var apiKey = localStorage.getItem("wixAdminApiKey") || "";
 var allSessions = [];
 var allLeads = [];
 var refreshInterval;
+var selectedSessionId = null;
 
 function switchTab(tabName) {
 var tabViews = document.querySelectorAll(".tab-view");
@@ -219,6 +235,8 @@ document.getElementById("auth-overlay").style.display = "none";
 document.getElementById("status-dot").classList.add("connected");
 document.getElementById("system-prompt").value = data.systemPrompt || "";
 document.getElementById("rep-email").value = data.repEmail || "";
+document.getElementById("telegram-chat-id").value = data.telegramChatId || "";
+document.getElementById("telegram-enabled").checked = data.telegramEnabled === true;
 
 if (data.apiError) {
 var logs = document.getElementById("api-logs");
@@ -231,11 +249,16 @@ allLeads = data.leads || [];
 
 renderSessions();
 renderLeads();
+if (selectedSessionId) {
+  const selectedIndex = allSessions.findIndex(s => s._id === selectedSessionId);
+  if (selectedIndex >= 0) renderTranscript(selectedIndex);
+  else { selectedSessionId = null; document.getElementById("admin-reply-panel").style.display = "none"; }
+}
 
 document.getElementById("refresh-btn").innerText = "🔄 Refresh Data";
 
 clearInterval(refreshInterval);
-refreshInterval = setInterval(fetchDashboardData, 60000);
+refreshInterval = setInterval(fetchDashboardData, 7000);
 } catch (error) {
 document.getElementById("auth-error").style.display = "block";
 document.getElementById("login-btn").innerText = "Secure Login";
@@ -270,6 +293,8 @@ alert("Error deleting " + itemName + ".");
 document.getElementById("save-prompt-btn").addEventListener("click", async function() {
 var prompt = document.getElementById("system-prompt").value;
 var email = document.getElementById("rep-email").value;
+var telegramChatId = document.getElementById("telegram-chat-id").value;
+var telegramEnabled = document.getElementById("telegram-enabled").checked;
 var btn = document.getElementById("save-prompt-btn");
 var originalText = btn.innerText;
 btn.innerText = "Processing...";
@@ -278,7 +303,7 @@ try {
 const response = await fetch(BASE_API_URL + "/adminConfig", {
 method: "POST",
 headers: { "Authorization": "Bearer " + apiKey, "Content-Type": "application/json" },
-body: JSON.stringify({ prompt: prompt, repEmail: email })
+body: JSON.stringify({ prompt: prompt, repEmail: email, telegramChatId, telegramEnabled })
 });
 
 if (!response.ok) throw new Error("Failed");
@@ -321,7 +346,9 @@ subDiv.textContent = msgCount + " messages • ID: " + shortId;
 row.appendChild(titleDiv);
 row.appendChild(subDiv);
 
+if (selectedSessionId === session._id) row.classList.add("selected");
 row.addEventListener("click", function() {
+selectedSessionId = session._id;
 var items = document.querySelectorAll("#sessions-list .list-item");
 for (var i = 0; i < items.length; i++) { items[i].classList.remove("selected"); }
 row.classList.add("selected");
@@ -370,6 +397,12 @@ function renderTranscript(index) {
 var view = document.getElementById("chat-view-area");
 view.innerHTML = "";
 var session = allSessions[index];
+selectedSessionId = session._id;
+document.getElementById("admin-reply-panel").style.display = "flex";
+var until = session.humanTakeoverUntil ? new Date(session.humanTakeoverUntil).getTime() : 0;
+document.getElementById("takeover-label").textContent = until > Date.now()
+  ? "Human takeover active until " + new Date(until).toLocaleString() + " (each admin reply resets 2 hours)"
+  : "AI is active — sending a reply starts a 2-hour takeover";
 var history = session.chatHistory || [];
 
 var headerDiv = document.createElement("div");
@@ -386,12 +419,35 @@ view.appendChild(headerDiv);
 
 history.forEach(function(msg) {
 var bubble = document.createElement("div");
-bubble.className = "chat-bubble " + (msg.role === "user" ? "user-chat" : msg.role === "assistant" ? "bot-chat" : "system-chat");
-var prefix = msg.role === "user" ? "👤 " : msg.role === "assistant" ? "🤖 " : "⚙️ ";
+bubble.className = "chat-bubble " + (msg.role === "user" ? "user-chat" : msg.source === "admin" ? "admin-chat" : msg.role === "assistant" ? "bot-chat" : "system-chat");
+var prefix = msg.role === "user" ? "👤 " : msg.source === "admin" ? "🧑‍💼 Admin: " : msg.role === "assistant" ? "🤖 " : "⚙️ ";
 bubble.textContent = prefix + msg.content;
 view.appendChild(bubble);
 });
+view.scrollTop = view.scrollHeight;
 }
+
+document.getElementById("admin-reply-send").addEventListener("click", async function() {
+  const content = document.getElementById("admin-reply-text");
+  const status = document.getElementById("admin-reply-status");
+  const button = this;
+  const id = selectedSessionId;
+  const message = content.value.trim();
+  if (!id || !message) return;
+  button.disabled = true;
+  status.textContent = "Sending...";
+  try {
+    const result = await fetch(BASE_API_URL + "/adminSend", {
+      method:"POST", headers:{"Authorization":"Bearer " + apiKey,"Content-Type":"application/json"},
+      body:JSON.stringify({id,message})
+    });
+    if (!result.ok) throw new Error("Message failed to send (HTTP " + result.status + ")");
+    content.value = "";
+    status.textContent = "Sent. AI paused for 2 hours from this message.";
+    await fetchDashboardData();
+  } catch(error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+});
 
 function renderLeadDetail(index) {
 var view = document.getElementById("lead-view-area");
