@@ -73,6 +73,16 @@ body { background-color: #f4f6f8; color: #333; height: 100vh; display: flex; ove
 .reply-controls textarea { flex:1;resize:vertical;min-height:58px;padding:10px;border:1px solid #ccc;border-radius:7px;font:inherit; }
 .reply-controls button { align-self:stretch; }
 .takeover-label {font-size:13px;color:#722F82;font-weight:600;}
+/* Message timestamps and day separators */
+.chat-bubble { display:flex; flex-direction:column; gap:5px; white-space:pre-wrap; }
+.chat-time { font-size:11px; color:#75808d; align-self:flex-end; letter-spacing:.1px; }
+.chat-day { display:flex; align-items:center; justify-content:center; margin:16px 0 12px; }
+.chat-day span { background:#e7eaf0; color:#566170; border-radius:20px; padding:6px 14px; font-size:12px; font-weight:600; }
+.chat-detail-header { padding:10px 14px; background:#fff; border:1px solid #e8e4ec; border-radius:9px; margin-bottom:16px; }
+.chat-detail-header strong { display:block; font-size:15px; color:#273244; }
+.chat-detail-header small { display:block; font-size:12px; color:#75808d; margin-top:4px; }
+.session-preview { margin-top:5px; color:#5e6976; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.session-date { font-size:11px; color:#74808c; margin-top:5px; }
 </style>
 </head>
 <body>
@@ -110,7 +120,9 @@ Wizenards Admin <div id="status-dot" class="brand-status"></div>
 </div>
 <div id="tab-chats" class="tab-view active">
 <div class="panel list-panel">
-<div class="list-header">Visitor Sessions</div>
+<div class="list-header">Visitor Sessions <span id="chat-session-count" style="font-weight:400;color:#777;font-size:12px"></span>
+  <input id="chat-session-search" type="search" placeholder="Search visitor, email or message..." aria-label="Search chats" style="display:block;width:100%;margin-top:12px;padding:10px 11px;border:1px solid #ddd;border-radius:7px;font-size:13px;font-weight:400">
+</div>
 <div id="sessions-list" class="scrollable-list"></div>
 </div>
 <div class="panel view-panel" style="flex:1;">
@@ -187,6 +199,8 @@ var allSessions = [];
 var allLeads = [];
 var refreshInterval;
 var selectedSessionId = null;
+var lastTranscriptSignature = '';
+var lastTranscriptSessionId = null;
 var telegramWasConnected = false;
 var telegramPairCodeShown = false;
 var settingsLoaded = false;
@@ -221,7 +235,6 @@ document.getElementById("page-title").innerText = "Bot Settings";
 if (apiKey) {
 document.getElementById("api-key-input").value = apiKey;
 document.getElementById("login-btn").click();
-fetchDashboardData();
 }
 
 document.getElementById("logout-btn").addEventListener("click", function() {
@@ -247,7 +260,7 @@ method: "GET",
 headers: { "Authorization": "Bearer " + apiKey, "Content-Type": "application/json" }
 });
 
-if (!response.ok) throw new Error("Unauthorized");
+if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? "Unauthorized" : "Dashboard HTTP " + response.status);
 
 localStorage.setItem("wixAdminApiKey", apiKey);
 const data = await response.json();
@@ -295,8 +308,23 @@ renderSessions();
 renderLeads();
 if (selectedSessionId) {
   const selectedIndex = allSessions.findIndex(s => s._id === selectedSessionId);
-  if (selectedIndex >= 0) renderTranscript(selectedIndex);
-  else { selectedSessionId = null; document.getElementById("admin-reply-panel").style.display = "none"; }
+  if (selectedIndex >= 0) {
+    const selected = allSessions[selectedIndex];
+    const signature = JSON.stringify([selected.chatHistory, selected.humanTakeoverUntil, selected.email]);
+    if (selectedSessionId !== lastTranscriptSessionId || signature !== lastTranscriptSignature) {
+      const view = document.getElementById('chat-view-area');
+      const nearBottom = view.scrollHeight - view.scrollTop - view.clientHeight < 100;
+      const oldScroll = view.scrollTop;
+      renderTranscript(selectedIndex);
+      if (!nearBottom) view.scrollTop = oldScroll;
+    } else {
+      const until = selected.humanTakeoverUntil ? new Date(selected.humanTakeoverUntil).getTime() : 0;
+      document.getElementById('takeover-label').textContent = until > Date.now()
+        ? 'Human takeover until ' + displayTimestamp(until) + ' (admin reply resets 2 hours)'
+        : 'AI active — sending a reply starts a 2-hour takeover';
+    }
+  } else { selectedSessionId = null; lastTranscriptSessionId = null;
+    document.getElementById("admin-reply-panel").style.display = "none"; }
 }
 
 document.getElementById("refresh-btn").innerText = "🔄 Refresh Data";
@@ -424,42 +452,63 @@ document.getElementById("telegram-disconnect").addEventListener("click",function
     telegramAdminAction("/adminTelegramDisconnect",this);
 });
 
-function renderSessions() {
-var list = document.getElementById("sessions-list");
-list.innerHTML = "";
-if (allSessions.length === 0) {
-list.innerHTML = "<div style='padding:20px;text-align:center;'>No chat sessions yet.</div>";
-return;
+const messageDate = value => {
+  if(!value)return null;
+  const d=new Date(value);
+  return Number.isNaN(d.getTime())?null:d;
+};
+function displayTimestamp(value){
+  const d=messageDate(value);
+  return d?new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(d):'Date unavailable';
 }
-
-allSessions.forEach(function(session, index) {
-var row = document.createElement("div");
-row.className = "list-item";
-var displayId = session.email ? session.email : "Anonymous Guest";
-var msgCount = session.chatHistory ? session.chatHistory.length : 0;
-var shortId = session.sessionId ? session.sessionId.substring(0, 6) : "";
-
-var titleDiv = document.createElement("div");
-titleDiv.className = "item-title";
-titleDiv.textContent = displayId;
-
-var subDiv = document.createElement("div");
-subDiv.className = "item-sub";
-subDiv.textContent = msgCount + " messages • ID: " + shortId;
-
-row.appendChild(titleDiv);
-row.appendChild(subDiv);
-
-if (selectedSessionId === session._id) row.classList.add("selected");
-row.addEventListener("click", function() {
-selectedSessionId = session._id;
-var items = document.querySelectorAll("#sessions-list .list-item");
-for (var i = 0; i < items.length; i++) { items[i].classList.remove("selected"); }
-row.classList.add("selected");
-renderTranscript(index);
-});
-list.appendChild(row);
-});
+function displayTime(value){
+  const d=messageDate(value);
+  return d?new Intl.DateTimeFormat(undefined,{hour:'numeric',minute:'2-digit'}).format(d):'';
+}
+function displayDay(value){
+  const d=messageDate(value);
+  return d?new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',year:'numeric'}).format(d):'';
+}
+function latestSessionActivity(session){
+  const history=Array.isArray(session.chatHistory)?session.chatHistory:[];
+  return session._updatedDate || (history.length?history[history.length-1].at:null) || session._createdDate;
+}
+document.getElementById('chat-session-search').addEventListener('input',renderSessions);
+function renderSessions() {
+  const list=document.getElementById('sessions-list');
+  list.innerHTML='';
+  const query=document.getElementById('chat-session-search').value.trim().toLowerCase();
+  const matches=allSessions.filter(session=>{
+    if(!query)return true;
+    const haystack=[session.email,session.sessionId,
+      ...(Array.isArray(session.chatHistory)?session.chatHistory.map(m=>m.content):[])]
+      .filter(v=>typeof v==='string').join(' ').toLowerCase();
+    return haystack.includes(query);
+  });
+  document.getElementById('chat-session-count').textContent='('+matches.length+' / '+allSessions.length+')';
+  if(!matches.length){list.innerHTML='<div style="padding:20px;text-align:center;color:#888">No matching sessions.</div>';return}
+  matches.forEach(session=>{
+    const row=document.createElement('div');row.className='list-item';
+    if(selectedSessionId===session._id)row.classList.add('selected');
+    const title=document.createElement('div');title.className='item-title';
+    title.textContent=session.email||'Anonymous Guest';row.appendChild(title);
+    const history=Array.isArray(session.chatHistory)?session.chatHistory:[];
+    const last=history.length?history[history.length-1]:null;
+    const preview=document.createElement('div');preview.className='session-preview';
+    preview.textContent=last?((last.source==='admin'?'Admin: ':last.role==='user'?'Visitor: ':'AI: ')+String(last.content||'')):'No messages yet';
+    row.appendChild(preview);
+    const sub=document.createElement('div');sub.className='item-sub';
+    sub.textContent=history.length+' messages • ID: '+String(session.sessionId||'').slice(0,12);
+    row.appendChild(sub);
+    const when=document.createElement('div');when.className='session-date';
+    when.textContent='Last activity: '+displayTimestamp(latestSessionActivity(session));row.appendChild(when);
+    row.addEventListener('click',()=>{
+      selectedSessionId=session._id;renderSessions();
+      const index=allSessions.findIndex(item=>item._id===session._id);
+      if(index>=0)renderTranscript(index);
+    });
+    list.appendChild(row);
+  });
 }
 
 function renderLeads() {
@@ -498,37 +547,46 @@ list.appendChild(row);
 }
 
 function renderTranscript(index) {
-var view = document.getElementById("chat-view-area");
-view.innerHTML = "";
-var session = allSessions[index];
-selectedSessionId = session._id;
-document.getElementById("admin-reply-panel").style.display = "flex";
-var until = session.humanTakeoverUntil ? new Date(session.humanTakeoverUntil).getTime() : 0;
-document.getElementById("takeover-label").textContent = until > Date.now()
-  ? "Human takeover active until " + new Date(until).toLocaleString() + " (each admin reply resets 2 hours)"
-  : "AI is active — sending a reply starts a 2-hour takeover";
-var history = session.chatHistory || [];
-
-var headerDiv = document.createElement("div");
-headerDiv.style.display = "flex";
-headerDiv.style.justifyContent = "flex-end";
-headerDiv.style.marginBottom = "20px";
-
-var deleteBtn = document.createElement("button");
-deleteBtn.className = "btn btn-delete";
-deleteBtn.textContent = "🗑️ Delete Session";
-deleteBtn.onclick = function() { deleteItem("session", session._id); };
-headerDiv.appendChild(deleteBtn);
-view.appendChild(headerDiv);
-
-history.forEach(function(msg) {
-var bubble = document.createElement("div");
-bubble.className = "chat-bubble " + (msg.role === "user" ? "user-chat" : msg.source === "admin" ? "admin-chat" : msg.role === "assistant" ? "bot-chat" : "system-chat");
-var prefix = msg.role === "user" ? "👤 " : msg.source === "admin" ? "🧑‍💼 Admin: " : msg.role === "assistant" ? "🤖 " : "⚙️ ";
-bubble.textContent = prefix + msg.content;
-view.appendChild(bubble);
-});
-view.scrollTop = view.scrollHeight;
+  const view=document.getElementById('chat-view-area');
+  view.innerHTML='';
+  const session=allSessions[index];
+  if(!session)return;
+  selectedSessionId=session._id;
+  lastTranscriptSessionId=session._id;
+  lastTranscriptSignature=JSON.stringify([session.chatHistory, session.humanTakeoverUntil, session.email]);
+  document.getElementById('admin-reply-panel').style.display='flex';
+  const until=session.humanTakeoverUntil?new Date(session.humanTakeoverUntil).getTime():0;
+  document.getElementById('takeover-label').textContent=until>Date.now()
+    ?'Human takeover until '+displayTimestamp(until)+' (admin reply resets 2 hours)'
+    :'AI active — sending a reply starts a 2-hour takeover';
+  const header=document.createElement('div');header.className='chat-detail-header';
+  const name=document.createElement('strong');name.textContent=session.email||'Anonymous Guest';header.appendChild(name);
+  const details=document.createElement('small');
+  details.textContent='Started: '+displayTimestamp(session._createdDate)+' • Last activity: '+displayTimestamp(latestSessionActivity(session));
+  header.appendChild(details);
+  const del=document.createElement('button');del.className='btn btn-delete';del.textContent='🗑️ Delete Session';
+  del.style.marginTop='10px';del.onclick=()=>deleteItem('session',session._id);
+  header.appendChild(del);view.appendChild(header);
+  const history=Array.isArray(session.chatHistory)?session.chatHistory:[];
+  let previousDay='';
+  history.forEach(msg=>{
+    const day=displayDay(msg.at);
+    if(day&&day!==previousDay){
+      const separator=document.createElement('div');separator.className='chat-day';
+      const chip=document.createElement('span');chip.textContent=day;
+      separator.appendChild(chip);view.appendChild(separator);previousDay=day;
+    }
+    const bubble=document.createElement('div');
+    bubble.className='chat-bubble '+(msg.role==='user'?'user-chat':msg.source==='admin'?'admin-chat':msg.role==='assistant'?'bot-chat':'system-chat');
+    const content=document.createElement('div');
+    content.textContent=(msg.role==='user'?'👤 ':msg.source==='admin'?'🧑‍💼 Admin: ':msg.role==='assistant'?'🤖 ':'⚙️ ')+String(msg.content||'');
+    bubble.appendChild(content);
+    const time=displayTime(msg.at);
+    if(time){const stamp=document.createElement('div');stamp.className='chat-time';
+      stamp.textContent=time;stamp.title=displayTimestamp(msg.at);bubble.appendChild(stamp)}
+    view.appendChild(bubble);
+  });
+  view.scrollTop=view.scrollHeight;
 }
 
 document.getElementById("admin-reply-send").addEventListener("click", async function() {
