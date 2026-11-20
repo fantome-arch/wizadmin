@@ -148,8 +148,26 @@ Wizenards Admin <div id="status-dot" class="brand-status"></div>
 <textarea id="system-prompt" placeholder="Loading..."></textarea>
 </div>
 <div class="form-group"><label><input type="checkbox" id="telegram-enabled" style="width:auto;margin-right:8px">Enable Telegram visitor alerts</label></div>
-<div class="form-group"><label>Telegram Chat ID (not the bot token)</label><input type="text" id="telegram-chat-id" placeholder="e.g. 123456789"></div>
-<p style="font-size:12px;color:#777;margin-bottom:15px">Store the bot token in Wix Secrets Manager as TELEGRAM_BOT_TOKEN. Messages will be forwarded to this chat.</p>
+<div class="form-group">
+  <label>Telegram administrator</label>
+  <p id="telegram-admin-status" style="font-size:14px;margin:6px 0;color:#555">Checking connection...</p>
+  <p style="font-size:12px;color:#777;margin:8px 0">Your bot token stays in Wix Secrets Manager as TELEGRAM_BOT_TOKEN. Only one Telegram account can receive alerts.</p>
+  <button id="telegram-connect" class="btn" type="button">Generate Code</button>
+  <button id="telegram-disconnect" class="btn btn-delete" type="button" style="margin-left:8px">Disconnect Admin</button>
+  <div id="telegram-pairing" style="display:none;margin-top:15px;padding:14px;background:#f4eef5;border-radius:8px">
+    <p style="margin-bottom:10px">This <strong>8-character</strong> one-time code expires after <strong>10 minutes</strong>. Open the bot on the new admin's phone and send the command below in a private chat. Every new code invalidates the previous one.</p>
+    <p style="margin-bottom:6px;font-size:12px;font-weight:bold">ONE-TIME CODE</p>
+    <code id="telegram-pair-code" style="display:block;background:white;padding:10px;font-size:17px;letter-spacing:1px;overflow-wrap:anywhere;user-select:all"></code>
+    <button id="telegram-copy-code" type="button" class="btn" style="padding:8px 12px;font-size:13px;margin:8px 0">Copy Code</button>
+    <p style="margin:8px 0 6px;font-size:12px;font-weight:bold">TELEGRAM COMMAND</p>
+    <code id="telegram-pair-command" style="display:block;background:white;padding:10px;overflow-wrap:anywhere;user-select:all"></code>
+    <button id="telegram-copy-command" type="button" class="btn" style="padding:8px 12px;font-size:13px;margin:8px 0">Copy /change Command</button>
+    <p style="margin-top:8px;font-size:13px">Bot: <a id="telegram-bot-link" href="#" target="_blank" rel="noopener noreferrer" style="color:#722F82">Open in Telegram</a></p>
+    <p id="telegram-expiration" style="font-size:12px;color:#666;margin-top:8px"></p>
+    <p style="font-size:12px;color:#666;margin-top:6px">Whoever uses the code first becomes the only alert administrator. Share it privately.</p>
+  </div>
+  <p id="telegram-pair-status" style="font-size:13px;color:#777;margin-top:8px"></p>
+</div>
 <button id="save-prompt-btn" class="btn">Save Configuration Live</button>
 </div>
 <div class="settings-card">
@@ -169,6 +187,9 @@ var allSessions = [];
 var allLeads = [];
 var refreshInterval;
 var selectedSessionId = null;
+var telegramWasConnected = false;
+var telegramPairCodeShown = false;
+var settingsLoaded = false;
 
 function switchTab(tabName) {
 var tabViews = document.querySelectorAll(".tab-view");
@@ -233,10 +254,33 @@ const data = await response.json();
 
 document.getElementById("auth-overlay").style.display = "none";
 document.getElementById("status-dot").classList.add("connected");
-document.getElementById("system-prompt").value = data.systemPrompt || "";
-document.getElementById("rep-email").value = data.repEmail || "";
-document.getElementById("telegram-chat-id").value = data.telegramChatId || "";
-document.getElementById("telegram-enabled").checked = data.telegramEnabled === true;
+if (!settingsLoaded || document.getElementById("tab-settings").style.display === "none") {
+  document.getElementById("system-prompt").value = data.systemPrompt || "";
+  document.getElementById("rep-email").value = data.repEmail || "";
+  document.getElementById("telegram-enabled").checked = data.telegramEnabled === true;
+  settingsLoaded = true;
+}
+const tgStatus = document.getElementById("telegram-admin-status");
+if (data.telegramConnected) {
+  tgStatus.textContent = "Connected: " + (data.telegramAdminName || "Telegram admin") +
+    (data.telegramEnabled ? " • Alerts enabled" : " • Alerts paused");
+} else {
+  tgStatus.textContent = "No Telegram administrator connected";
+}
+if (telegramPairCodeShown && !data.telegramPairPending) {
+  // The code was used or expired. Hide it so it cannot be copied afterward.
+  document.getElementById("telegram-pairing").style.display = "none";
+  document.getElementById("telegram-pair-code").textContent = "";
+  document.getElementById("telegram-pair-command").textContent = "";
+  telegramPairCodeShown = false;
+  document.getElementById("telegram-pair-status").textContent = data.telegramConnected
+    ? "Connection code consumed or expired. Current admin: " + (data.telegramAdminName || "Telegram admin")
+    : "Code expired or was invalidated. Generate another code to connect.";
+}
+if (!data.telegramConnected && telegramWasConnected) {
+  document.getElementById("telegram-enabled").checked = false;
+}
+telegramWasConnected = data.telegramConnected === true;
 
 if (data.apiError) {
 var logs = document.getElementById("api-logs");
@@ -293,7 +337,6 @@ alert("Error deleting " + itemName + ".");
 document.getElementById("save-prompt-btn").addEventListener("click", async function() {
 var prompt = document.getElementById("system-prompt").value;
 var email = document.getElementById("rep-email").value;
-var telegramChatId = document.getElementById("telegram-chat-id").value;
 var telegramEnabled = document.getElementById("telegram-enabled").checked;
 var btn = document.getElementById("save-prompt-btn");
 var originalText = btn.innerText;
@@ -303,7 +346,7 @@ try {
 const response = await fetch(BASE_API_URL + "/adminConfig", {
 method: "POST",
 headers: { "Authorization": "Bearer " + apiKey, "Content-Type": "application/json" },
-body: JSON.stringify({ prompt: prompt, repEmail: email, telegramChatId, telegramEnabled })
+body: JSON.stringify({ prompt: prompt, repEmail: email, telegramEnabled })
 });
 
 if (!response.ok) throw new Error("Failed");
@@ -318,6 +361,67 @@ btn.style.backgroundColor = "#722F82";
 btn.innerText = "Error Saving";
 btn.style.backgroundColor = "#ff5252";
 }
+});
+
+async function telegramAdminAction(endpoint, button) {
+  const original = button.textContent;
+  button.disabled = true;
+  const status = document.getElementById("telegram-pair-status");
+  status.textContent = "Contacting Wix...";
+  try {
+    const res = await fetch(BASE_API_URL + endpoint, {
+      method:"POST",headers:{"Authorization":"Bearer " + apiKey,"Content-Type":"application/json"},
+      body:JSON.stringify({})
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || "Request failed: HTTP " + res.status);
+    if (endpoint === "/adminTelegramConnect") {
+      document.getElementById("telegram-pair-code").textContent = data.code;
+      document.getElementById("telegram-pair-command").textContent = data.command;
+      const bot = document.getElementById("telegram-bot-link");
+      bot.href = data.botUrl;
+      bot.textContent = "Open " + (new URL(data.botUrl).pathname.slice(1) || "your bot");
+      document.getElementById("telegram-expiration").textContent =
+        "Expires: " + new Date(data.expiresAt).toLocaleString();
+      document.getElementById("telegram-pairing").style.display = "block";
+      telegramPairCodeShown = true;
+      status.textContent = (data.replacing ? "Existing admin stays connected until the new account sends the code. " : "") +
+        "Copy /change CODE and send it from the desired admin's Telegram account.";
+    } else {
+      document.getElementById("telegram-pairing").style.display = "none";
+      telegramPairCodeShown = false;
+      document.getElementById("telegram-pair-code").textContent = "";
+      document.getElementById("telegram-pair-command").textContent = "";
+      document.getElementById("telegram-enabled").checked = false;
+      status.textContent = "Administrator disconnected. Telegram alerts disabled.";
+      await fetchDashboardData();
+    }
+  } catch(e) {status.textContent = "Error: " + e.message;}
+  finally {button.disabled = false;button.textContent = original;}
+}
+async function copyTelegramText(id) {
+  const value = document.getElementById(id).textContent;
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    document.getElementById("telegram-pair-status").textContent = "Copied. Send the command privately to your Telegram bot.";
+  } catch(e) {
+    // This still lets the admin copy manually in browsers without clipboard permission.
+    window.prompt("Copy the text below:",value);
+  }
+}
+document.getElementById("telegram-copy-code").addEventListener("click",function(){
+  copyTelegramText("telegram-pair-code");
+});
+document.getElementById("telegram-copy-command").addEventListener("click",function(){
+  copyTelegramText("telegram-pair-command");
+});
+document.getElementById("telegram-connect").addEventListener("click",function(){
+  telegramAdminAction("/adminTelegramConnect",this);
+});
+document.getElementById("telegram-disconnect").addEventListener("click",function(){
+  if (confirm("Disconnect the current Telegram admin and stop visitor alerts?"))
+    telegramAdminAction("/adminTelegramDisconnect",this);
 });
 
 function renderSessions() {
